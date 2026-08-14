@@ -3,6 +3,8 @@ import { twMerge } from "tailwind-merge"
 
 import { getAuthUserApiV1UserAuthUserGet } from "@/client/sdk.gen";
 import { getWorkflowCountApiV1WorkflowCountGet } from "@/client/sdk.gen";
+import { impersonateApiV1SuperuserImpersonatePost } from "@/client/sdk.gen";
+import { detailFromError } from "@/lib/apiError";
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
@@ -52,14 +54,10 @@ export async function getRedirectUrl(token: string, permissions: { id: string }[
     console.log('[getRedirectUrl] Auth user response:', {
       hasData: !!authUser.data,
       isSuperuser: authUser.data?.is_superuser,
-      isPlatformAdmin: authUser.data?.is_platform_admin,
-      email: authUser.data?.email,
       userId: authUser.data?.id
     });
-    
-    // Only redirect to /superadmin if user is the reserved platform admin (admin@admin.com)
-    if (authUser.data?.is_platform_admin) {
-      console.log('[getRedirectUrl] User is reserved platform admin (admin@admin.com), redirecting to /superadmin');
+    if (authUser.data?.is_superuser) {
+      console.log('[getRedirectUrl] User is superuser, redirecting to /superadmin');
       return "/superadmin";
     }
 
@@ -107,3 +105,110 @@ export async function getRedirectUrl(token: string, permissions: { id: string }[
   }
 }
 
+
+/**
+ * Centralised impersonation logic to avoid code duplication between pages.
+ *
+ * It performs the super-admin impersonate request, sends the Stack tokens to
+ * the target-domain helper route, and optionally redirects the browser to the
+ * supplied path.
+ */
+export async function impersonateAsSuperadmin(params: {
+  accessToken: string;
+  userId?: number;
+  providerUserId?: string;
+  email?: string;
+  redirectPath?: string;
+  /**
+   * If true the browser opens the impersonated session in a **new tab**
+   * (via `window.open`). Defaults to `false` which navigates in the current tab.
+   */
+  openInNewTab?: boolean;
+}): Promise<void> {
+  const {
+    accessToken: adminAccessToken,
+    userId,
+    providerUserId,
+    email,
+    redirectPath,
+    openInNewTab = false,
+  } = params;
+  const targetWindow = openInNewTab ? window.open('', '_blank') : null;
+  if (targetWindow) {
+    targetWindow.opener = null;
+  }
+  if (openInNewTab && !targetWindow) {
+    throw new Error('Unable to open impersonation tab. Please allow pop-ups and try again.');
+  }
+
+  // Build request body depending on which identifier we have.
+  const body: Record<string, unknown> = {};
+  if (userId !== undefined) {
+    body.user_id = userId;
+  }
+  if (providerUserId !== undefined) {
+    body.provider_user_id = providerUserId;
+  }
+  if (email !== undefined) {
+    body.email = email;
+  }
+
+  if (Object.keys(body).length === 0) {
+    targetWindow?.close();
+    throw new Error('Either userId, providerUserId, or email must be provided');
+  }
+
+  let resp: Awaited<ReturnType<typeof impersonateApiV1SuperuserImpersonatePost>>;
+  try {
+    resp = await impersonateApiV1SuperuserImpersonatePost({
+      body,
+      headers: {
+        Authorization: `Bearer ${adminAccessToken}`,
+      },
+    });
+  } catch (error) {
+    targetWindow?.close();
+    throw error;
+  }
+
+  if (resp.error) {
+    targetWindow?.close();
+    throw new Error(detailFromError(resp.error, 'Failed to impersonate user'));
+  }
+
+  const refreshToken = resp.data?.refresh_token;
+  if (!refreshToken) {
+    targetWindow?.close();
+    throw new Error('No refresh token returned from impersonate');
+  }
+
+  // ---------------------------------------------------------------------------------
+  // Instead of setting the cookie here (which would also affect the superadmin
+  // sub-domain), redirect the browser to the dedicated impersonation helper route
+  // (served from the target sub-domain, e.g. app.dograh.com). The route will set the
+  // cookie for the *current* sub-domain only and then forward the user to the final
+  // destination.
+  // ---------------------------------------------------------------------------------
+
+  // Determine the base URL that should handle the impersonation cookie. Configured
+  // via NEXT_PUBLIC_APP_URL (e.g. https://app.dograh.com); falls back to the current
+  // origin (e.g. localhost, staging, or already on the app).
+  const appBaseUrl = process.env.NEXT_PUBLIC_APP_URL || window.location.origin;
+
+  const finalRedirect = redirectPath ?? '/workflow';
+
+  // Build the redirect URL to the helper route, passing along the refresh token and
+  // the final destination.
+  const impersonateUrl = new URL('/impersonate', appBaseUrl);
+  impersonateUrl.searchParams.set('refresh_token', refreshToken);
+  impersonateUrl.searchParams.set('redirect_path', finalRedirect);
+
+  if (openInNewTab) {
+    if (!targetWindow) {
+      throw new Error('Unable to open impersonation tab. Please allow pop-ups and try again.');
+    }
+    targetWindow.location.href = impersonateUrl.toString();
+  } else {
+    window.location.href = impersonateUrl.toString();
+  }
+}

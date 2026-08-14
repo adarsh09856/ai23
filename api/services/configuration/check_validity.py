@@ -34,8 +34,10 @@ class APIKeyStatusResponse(TypedDict):
 
 class UserConfigurationValidator:
     def __init__(self):
+        self._dograh_service_key_validation_cache: dict[str, bool] = {}
         self._validator_map = {
             ServiceProviders.OPENAI.value: self._check_openai_api_key,
+            ServiceProviders.ATLASCLOUD.value: self._check_openai_api_key,
             ServiceProviders.DEEPGRAM.value: self._check_deepgram_api_key,
             ServiceProviders.GROQ.value: self._check_groq_api_key,
             ServiceProviders.OPENROUTER.value: self._check_openrouter_api_key,
@@ -74,6 +76,9 @@ class UserConfigurationValidator:
         organization_id: Optional[int] = None,
         created_by: Optional[str] = None,
     ) -> APIKeyStatusResponse:
+        # A managed configuration commonly repeats one service key across LLM,
+        # STT, TTS, and embeddings. Validate that credential once per request.
+        self._dograh_service_key_validation_cache.clear()
         self._auth_context: AuthContext = {
             "organization_id": organization_id,
             "created_by": created_by,
@@ -229,6 +234,7 @@ class UserConfigurationValidator:
 
         if provider in (
             ServiceProviders.OPENAI.value,
+            ServiceProviders.ATLASCLOUD.value,
             ServiceProviders.OPENAI_REALTIME.value,
         ):
             return validator(provider, api_key, service_config)
@@ -237,6 +243,9 @@ class UserConfigurationValidator:
     def _check_openai_api_key(
         self, model: str, api_key: str, service_config: Optional[ServiceConfig] = None
     ) -> bool:
+        provider_name = (
+            "Atlas Cloud" if model == ServiceProviders.ATLASCLOUD.value else "OpenAI"
+        )
         client_kwargs: dict[str, str] = {"api_key": api_key}
         base_url = getattr(service_config, "base_url", None) if service_config else None
         if base_url:
@@ -248,7 +257,8 @@ class UserConfigurationValidator:
         except openai.AuthenticationError:
             if base_url and "openai.com" not in base_url:
                 raise ValueError(
-                    f"Invalid OpenAI API key. The key was rejected by the API at {base_url}. "
+                    f"Invalid {provider_name} API key. The key was rejected by the API at "
+                    f"{base_url}. "
                     "Please check that your API key is correct and has not been revoked."
                 )
             raise ValueError(
@@ -280,12 +290,13 @@ class UserConfigurationValidator:
         except Exception:
             if base_url:
                 raise ValueError(
-                    f"Failed to validate the OpenAI API key using the API at {base_url}. "
+                    f"Failed to validate the {provider_name} API key using the API at "
+                    f"{base_url}. "
                     "Please verify that the base_url is correct and reachable, and that the "
                     "API key is valid."
                 )
             raise ValueError(
-                "Failed to validate the OpenAI API key. Please try again later."
+                f"Failed to validate the {provider_name} API key. Please try again later."
             )
 
     def _check_deepgram_api_key(self, model: str, api_key: str) -> bool:
@@ -337,11 +348,16 @@ class UserConfigurationValidator:
                 "Please use a service key (mps...)."
             )
         auth = getattr(self, "_auth_context", {})
-        return mps_service_key_client.validate_service_key(
+        if api_key in self._dograh_service_key_validation_cache:
+            return self._dograh_service_key_validation_cache[api_key]
+
+        is_valid = mps_service_key_client.validate_service_key(
             api_key,
             organization_id=auth.get("organization_id"),
             created_by=auth.get("created_by"),
         )
+        self._dograh_service_key_validation_cache[api_key] = is_valid
+        return is_valid
 
     def _check_sarvam_api_key(self, model: str, api_key: str) -> bool:
         return True

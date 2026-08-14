@@ -6,6 +6,7 @@ from loguru import logger
 
 from api.db import db_client
 from api.enums import WorkflowRunMode
+from api.errors.failure import mark_failure_reported
 from api.schemas.workflow_configurations import (
     DEFAULT_MAX_CALL_DURATION_SECONDS,
     DEFAULT_MAX_USER_IDLE_TIMEOUT_SECONDS,
@@ -72,6 +73,7 @@ from api.services.pipecat.worker_runner import run_pipeline_worker
 from api.services.pipecat.ws_sender_registry import get_ws_sender
 from api.services.telephony import registry as telephony_registry
 from api.services.workflow.dto import ReactFlowDTO
+from api.services.workflow.initial_context import merge_external_initial_context
 from api.services.workflow.pipecat_engine import PipecatEngine
 from api.services.workflow.workflow_graph import WorkflowGraph
 from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
@@ -386,10 +388,13 @@ async def _run_pipeline_telephony_impl(
             organization_id=organization_id,
         )
     except Exception as e:
+        # Closest layer to the failure and the only one with the traceback, so
+        # it owns the report; outer handlers see the mark and stay quiet.
         logger.error(
             f"[run {workflow_run_id}] Error in {provider_name} pipeline: {e}",
             exc_info=True,
         )
+        mark_failure_reported(e)
         raise
 
 
@@ -591,7 +596,9 @@ async def _run_pipeline_impl(
     # If there is some extra call_context_vars, fold them in. Persistence
     # happens once below, after runtime_configuration is also resolved.
     if call_context_vars:
-        merged_call_context_vars = {**merged_call_context_vars, **call_context_vars}
+        merged_call_context_vars = merge_external_initial_context(
+            merged_call_context_vars, call_context_vars
+        )
 
     # Get workflow for metadata (name, organization_id, call_disposition_codes)
     workflow = await db_client.get_workflow(workflow_id, **workflow_scope)
@@ -640,6 +647,12 @@ async def _run_pipeline_impl(
     else:
         user_config = resolved_user_config
 
+    workflow_graph = WorkflowGraph(
+        ReactFlowDTO.model_validate(run_workflow_json),
+        skip_instance_constraints_for={"trigger"},
+    )
+    uses_variable_extraction = workflow_graph.uses_variable_extraction()
+
     from api.services.managed_model_services import (
         MPS_CORRELATION_ID_CONTEXT_KEY,
         ensure_mps_correlation_id,
@@ -683,6 +696,20 @@ async def _run_pipeline_impl(
         llm = create_llm_service(user_config, correlation_id=mps_correlation_id)
         inference_llm = None
 
+    # A shared LLM cannot carry an extraction usage_context without also tagging
+    # normal conversation or context-summarization requests. Create a dedicated
+    # client only for the managed provider; other providers ignore usage_context.
+    variable_extraction_llm = (
+        create_llm_service(
+            user_config,
+            correlation_id=mps_correlation_id,
+            usage_context="variable_extraction",
+        )
+        if uses_variable_extraction
+        and user_config.llm.provider == ServiceProviders.DOGRAH.value
+        else inference_llm or llm
+    )
+
     # Stamp the providers/models actually resolved for this run onto
     # initial_context so they're available for post-call analytics
     # (model_overrides may have shifted them away from the org-level
@@ -713,21 +740,21 @@ async def _run_pipeline_impl(
         workflow_run_id, initial_context=merged_call_context_vars
     )
 
-    workflow_graph = WorkflowGraph(
-        ReactFlowDTO.model_validate(run_workflow_json),
-        skip_instance_constraints_for={"trigger"},
-    )
-
     # Pre-call fetch: fire early so it runs concurrently with remaining setup
     pre_call_fetch_task = None
     start_node = workflow_graph.nodes.get(workflow_graph.start_node_id)
+    call_direction = getattr(workflow_run, "call_type", None)
+    if hasattr(call_direction, "value"):
+        call_direction = call_direction.value
+    call_direction = call_direction or merged_call_context_vars.get("direction")
     if (
         start_node
-        and start_node.pre_call_fetch_enabled
+        and start_node.should_run_pre_call_fetch(call_direction)
         and start_node.pre_call_fetch_url
     ):
         logger.info(
-            f"Pre-call fetch enabled for workflow run {workflow_run_id}, "
+            f"Pre-call fetch enabled for {call_direction or 'unknown'} workflow "
+            f"run {workflow_run_id}, "
             f"firing request to {start_node.pre_call_fetch_url}"
         )
         pre_call_fetch_task = asyncio.create_task(
@@ -817,6 +844,7 @@ async def _run_pipeline_impl(
     engine = PipecatEngine(
         llm=llm,
         inference_llm=inference_llm,
+        variable_extraction_llm=variable_extraction_llm,
         workflow=workflow_graph,
         call_context_vars=merged_call_context_vars,
         workflow_run_id=workflow_run_id,
@@ -1058,16 +1086,16 @@ async def _run_pipeline_impl(
     engine.set_task(task)
     engine.set_transport_output(transport.output())
 
-    # Initialize the engine to set the initial context with
-    # System Prompt and Tools
-    await engine.initialize()
-
-    # Add real-time feedback observer (always logs to buffer, streams to WS if available)
+    # Add the observer before initialization so early ErrorFrames are not missed.
     feedback_observer = RealtimeFeedbackObserver(
         ws_sender=ws_sender,
         logs_buffer=in_memory_logs_buffer,
     )
     task.add_observer(feedback_observer)
+
+    # Initialize the engine to set the initial context with
+    # System Prompt and Tools
+    await engine.initialize()
 
     # Register latency observer to log user-to-bot response latency
     if task.user_bot_latency_observer:

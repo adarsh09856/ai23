@@ -2,14 +2,37 @@ import json
 from datetime import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
 from api.db import db_client
 from api.db.models import UserModel
 from api.services.auth.depends import get_superuser
+from api.services.auth.stack_auth import (
+    StackAuthSessionError,
+    StackAuthUserSearchError,
+    stackauth,
+)
 
 router = APIRouter(prefix="/superuser", tags=["superuser"])
+
+
+class ImpersonateRequest(BaseModel):
+    """Request payload for superadmin impersonation.
+
+    ``provider_user_id``, ``user_id``, or ``email`` may be supplied. If more
+    than one is provided, ``provider_user_id`` takes precedence, followed by
+    ``user_id`` and then ``email``.
+    """
+
+    provider_user_id: str | None = None
+    user_id: int | None = None
+    email: str | None = None
+
+
+class ImpersonateResponse(BaseModel):
+    refresh_token: str
+    access_token: str
 
 
 class SuperuserWorkflowRunResponse(BaseModel):
@@ -37,6 +60,95 @@ class SuperuserWorkflowRunsListResponse(BaseModel):
     page: int
     limit: int
     total_pages: int
+
+
+@router.post("/impersonate")
+async def impersonate(
+    request: ImpersonateRequest, user: UserModel = Depends(get_superuser)
+) -> ImpersonateResponse:
+    """Impersonate a user as a super-admin.
+    Internally, Stack Auth requires the **provider user ID** (a UUID-ish string)
+    to create an impersonation session.
+    """
+
+    provider_user_id = (
+        request.provider_user_id.strip() if request.provider_user_id else None
+    ) or None
+    email = request.email.strip().lower() if request.email else None
+
+    # ------------------------------------------------------------------
+    # Fallback: resolve provider_user_id from internal ``user_id`` or email.
+    # ------------------------------------------------------------------
+    if provider_user_id is None:
+        if request.user_id is not None:
+            db_user = await db_client.get_user_by_id(request.user_id)
+
+            if db_user is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"User with ID {request.user_id} not found.",
+                )
+
+            provider_user_id = db_user.provider_id
+        elif email:
+            db_user = await db_client.get_user_by_email(email)
+
+            if db_user is not None:
+                provider_user_id = db_user.provider_id
+            else:
+                try:
+                    stack_users = await stackauth.find_users_by_email(email)
+                except StackAuthUserSearchError as exc:
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail="Failed to search Stack Auth users.",
+                    ) from exc
+
+                if len(stack_users) == 1 and isinstance(stack_users[0].get("id"), str):
+                    provider_user_id = stack_users[0]["id"]
+                elif len(stack_users) > 1:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="Multiple Stack Auth users matched that email.",
+                    )
+                else:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"User with email {email} not found.",
+                    )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "One of 'provider_user_id', 'user_id', or 'email' must be provided."
+                ),
+            )
+
+    # ------------------------------------------------------------------
+    # Call Stack Auth to create the impersonation session
+    # ------------------------------------------------------------------
+    try:
+        session = await stackauth.impersonate(provider_user_id)
+    except StackAuthSessionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to create Stack Auth impersonation session.",
+        ) from exc
+
+    if (
+        not isinstance(session, dict)
+        or "refresh_token" not in session
+        or "access_token" not in session
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to create Stack Auth impersonation session.",
+        )
+
+    return ImpersonateResponse(
+        refresh_token=session["refresh_token"],
+        access_token=session["access_token"],
+    )
 
 
 @router.get("/workflow-runs")

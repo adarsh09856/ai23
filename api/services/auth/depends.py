@@ -8,7 +8,7 @@ from api.db import db_client
 from api.db.models import UserModel
 from api.enums import PostHogEvent
 from api.services.auth.stack_auth import stackauth
-from api.services.mps_billing import ensure_hosted_mps_billing_account_v2
+from api.services.organization_bootstrap import ensure_organization_bootstrapped
 from api.services.posthog_client import (
     POSTHOG_ORGANIZATION_GROUP_TYPE,
     capture_event,
@@ -16,8 +16,6 @@ from api.services.posthog_client import (
     set_person_properties,
 )
 from api.utils.auth import decode_jwt_token
-
-PLATFORM_ADMIN_EMAIL = "admin@admin.com"
 
 
 async def require_local_auth() -> None:
@@ -134,28 +132,22 @@ async def get_user(
                 org_was_created=org_was_created,
             )
 
-            # Only create default configuration if organization was just created
-            # This prevents race conditions where multiple concurrent requests
-            # might try to create configurations
-            if org_was_created:
-                try:
-                    await ensure_hosted_mps_billing_account_v2(
-                        organization.id,
-                        created_by=str(stack_user["id"]),
-                    )
-                except Exception:
-                    logger.warning(
-                        "Failed to initialize hosted MPS billing account for "
-                        "organization {}",
-                        organization.id,
-                        exc_info=True,
-                    )
-
     except Exception as exc:
         raise HTTPException(
             status_code=500,
             detail=f"Failed to map user to organization: {exc}",
         )
+
+    # Deliberately outside the org-mapping branch above: provisioning is keyed
+    # on whether the organization is actually configured, not on whether this
+    # request happened to create it or switch the user into it. That is what
+    # lets a failed attempt be retried instead of stranding the organization
+    # with no model configuration forever. It is safe to call every request —
+    # it self-limits to one indexed read once the organization is provisioned.
+    await ensure_organization_bootstrapped(
+        organization.id,
+        created_by=str(stack_user["id"]),
+    )
 
     return user_model
 
@@ -280,13 +272,22 @@ async def _handle_oss_auth(authorization: str | None) -> UserModel:
     try:
         payload = decode_jwt_token(token)
         user = await db_client.get_user_by_id(int(payload["sub"]))
-        if user:
-            return user
-        raise HTTPException(status_code=401, detail="User not found")
+        if user is None:
+            raise HTTPException(status_code=401, detail="User not found")
     except HTTPException:
         raise
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    # Deliberately outside the try above: a provisioning failure must not be
+    # reported to the user as an expired token.
+    if user.selected_organization_id:
+        await ensure_organization_bootstrapped(
+            user.selected_organization_id,
+            created_by=user.provider_id,
+        )
+
+    return user
 
 
 async def _handle_api_key_auth(api_key: str) -> UserModel:
@@ -325,21 +326,14 @@ async def get_superuser(
     x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
 ) -> UserModel:
     """
-    Dependency to check if the authenticated user is the platform admin.
-    Raises HTTPException if user is not authenticated or does not match the
-    reserved superadmin account.
+    Dependency to check if the authenticated user is a superuser.
+    Raises HTTPException if user is not authenticated or not a superuser.
     """
     user = await get_user(authorization, x_api_key)
 
-    normalized_email = (user.email or "").strip().lower()
-
-    if not user.is_superuser or normalized_email != PLATFORM_ADMIN_EMAIL:
+    if not user.is_superuser:
         raise HTTPException(
-            status_code=403,
-            detail=(
-                "Access denied. Only the reserved platform admin account may "
-                "access this resource."
-            ),
+            status_code=403, detail="Access denied. Superuser privileges required."
         )
 
     return user

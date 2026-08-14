@@ -2,19 +2,22 @@ from datetime import datetime, timedelta
 from typing import List, Literal, Optional, TypedDict, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from loguru import logger
 from pydantic import BaseModel, ValidationError
 
 from api.db import db_client
 from api.db.models import (
     UserModel,
 )
+from api.errors.failure import ErrorSource, classify_exception, log_failure
+from api.errors.mps import MPSUnavailableError
 from api.schemas.onboarding_state import OnboardingState, OnboardingStateUpdate
+from api.schemas.widget_texts import WidgetTexts
 from api.schemas.workflow_configurations import (
+    TextChatInactivityTimeoutConstraints,
     WorkflowConfigurationDefaults,
     get_default_workflow_configurations,
 )
-from api.services.auth.depends import PLATFORM_ADMIN_EMAIL, get_user
+from api.services.auth.depends import get_user
 from api.services.configuration.ai_model_configuration import (
     convert_legacy_ai_model_configuration_to_v2,
     get_resolved_ai_model_configuration,
@@ -45,8 +48,6 @@ router = APIRouter(prefix="/user")
 class AuthUserResponse(TypedDict):
     id: int
     is_superuser: bool
-    email: str | None
-    is_platform_admin: bool
 
 
 class DefaultConfigurationsResponse(BaseModel):
@@ -57,6 +58,8 @@ class DefaultConfigurationsResponse(BaseModel):
     realtime: dict[str, dict]
     default_providers: dict[str, str]
     workflow_configurations: WorkflowConfigurationDefaults
+    text_chat_inactivity_timeout_constraints: TextChatInactivityTimeoutConstraints
+    widget_text_defaults: WidgetTexts
 
 
 @router.get("/configurations/defaults")
@@ -84,6 +87,10 @@ async def get_default_configurations() -> DefaultConfigurationsResponse:
         },
         "default_providers": DEFAULT_SERVICE_PROVIDERS,
         "workflow_configurations": get_default_workflow_configurations(),
+        "text_chat_inactivity_timeout_constraints": (
+            TextChatInactivityTimeoutConstraints()
+        ),
+        "widget_text_defaults": WidgetTexts(),
     }
     return DefaultConfigurationsResponse(**configurations)
 
@@ -92,14 +99,9 @@ async def get_default_configurations() -> DefaultConfigurationsResponse:
 async def get_auth_user(
     user: UserModel = Depends(get_user),
 ) -> AuthUserResponse:
-    normalized_email = (user.email or "").strip().lower()
     return {
         "id": user.id,
         "is_superuser": user.is_superuser,
-        "email": user.email,
-        "is_platform_admin": (
-            user.is_superuser and normalized_email == PLATFORM_ADMIN_EMAIL
-        ),
     }
 
 
@@ -481,9 +483,23 @@ async def get_voices(
             voices=[VoiceInfo(**voice) for voice in result.get("voices", [])],
             facets=result.get("facets"),
         )
+    except MPSUnavailableError:
+        # The MPS boundary emitted the classified failure. The app-level handler
+        # converts this typed dependency failure to a customer-safe HTTP 503.
+        raise
     except Exception as e:
-        logger.error(f"Failed to fetch voices for {provider}: {e}")
+        log_failure(
+            classify_exception(
+                e,
+                source=ErrorSource.PLATFORM,
+                provider="dograh",
+                error_owner="operator",
+            ),
+            organization_id=user.selected_organization_id,
+            operation="validate_voice_catalog_response",
+            requested_provider=provider,
+        )
         raise HTTPException(
             status_code=500,
             detail=f"Failed to fetch voices for {provider}",
-        )
+        ) from e

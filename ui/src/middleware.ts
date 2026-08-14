@@ -53,8 +53,12 @@ export async function middleware(request: NextRequest) {
   const token = request.cookies.get(OSS_TOKEN_COOKIE)?.value;
   const { pathname } = request.nextUrl;
 
-  // Allow public paths without auth
-  if (PUBLIC_PATHS.some((p) => pathname.startsWith(p))) {
+  // Allow public paths without auth. Match on a path-segment boundary (exact
+  // match or a `/`-delimited subpath) rather than a bare prefix, so a public
+  // entry like `/embed` exempts `/embed` and `/embed/...` but NOT sibling
+  // routes such as `/embed-admin` — a bare startsWith would let those bypass
+  // authentication.
+  if (PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`))) {
     return NextResponse.next();
   }
 
@@ -62,35 +66,6 @@ export async function middleware(request: NextRequest) {
   if (!token) {
     const loginUrl = new URL('/auth/login', request.url);
     return NextResponse.redirect(loginUrl);
-  }
-
-  // Block /superadmin routes for non-admin@admin.com users
-  if (pathname.startsWith('/superadmin')) {
-    try {
-      const backendUrl = getServerBackendUrl();
-      const res = await fetch(`${backendUrl}/api/v1/user/auth/user`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
-
-      if (res.ok) {
-        const authUser = await res.json();
-        // Only allow admin@admin.com with is_platform_admin flag
-        if (!authUser.is_platform_admin) {
-          const overviewUrl = new URL('/overview', request.url);
-          return NextResponse.redirect(overviewUrl);
-        }
-      } else {
-        // Invalid token, redirect to login
-        const loginUrl = new URL('/auth/login', request.url);
-        return NextResponse.redirect(loginUrl);
-      }
-    } catch {
-      // API error, redirect to overview to be safe
-      const overviewUrl = new URL('/overview', request.url);
-      return NextResponse.redirect(overviewUrl);
-    }
   }
 
   return NextResponse.next();

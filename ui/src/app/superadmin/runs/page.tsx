@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertTriangle, ArrowDown, ArrowUp, ArrowUpDown, CheckCircle, ChevronLeft, ChevronRight, Info, Loader2, RefreshCw } from 'lucide-react';
+import { AlertTriangle, ArrowDown, ArrowUp, ArrowUpDown, CheckCircle, ChevronLeft, ChevronRight, ExternalLink, FileText, Info, Loader2, RefreshCw } from 'lucide-react';
 import Image from 'next/image';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from "react";
@@ -24,6 +24,7 @@ import { useAuth } from '@/lib/auth';
 import { formatDateTime } from '@/lib/dateTime';
 import{ superadminFilterAttributes } from "@/lib/filterAttributes";
 import { decodeFiltersFromURL, encodeFiltersToURL } from '@/lib/filters';
+import { impersonateAsSuperadmin } from '@/lib/utils';
 import { ActiveFilter } from '@/types/filters';
 
 interface WorkflowRun {
@@ -242,6 +243,11 @@ export default function RunsPage() {
         updatePageInUrl(1, appliedFilters, newSortBy, newSortOrder);
     }, [sortBy, sortOrder, updatePageInUrl, appliedFilters]);
 
+    /**
+     * ----------------------------------------------------------------------------------
+     * Helpers
+     * ----------------------------------------------------------------------------------
+     */
 
     const calculateDuration = (isCompleted: boolean, usageInfo?: Record<string, unknown>) => {
         if (isCompleted && typeof usageInfo?.call_duration_seconds === 'number') {
@@ -250,6 +256,29 @@ export default function RunsPage() {
         return '-';
     };
 
+
+    /**
+     * Wrapper around shared impersonation util – we only need to fetch the
+     * current superadmin token and then delegate the heavy lifting.
+     */
+    const impersonateAndMaybeRedirect = useCallback(
+        async (targetUserId: number | undefined, redirectPath?: string) => {
+            if (!targetUserId || !auth.isAuthenticated) return;
+            try {
+                const token = await auth.getAccessToken();
+                await impersonateAsSuperadmin({
+                    accessToken: token,
+                    userId: targetUserId,
+                    redirectPath,
+                    openInNewTab: true,
+                });
+            } catch (err) {
+                console.error('Failed to impersonate user', err);
+                alert('Failed to impersonate the user. Please try again.');
+            }
+        },
+        [auth],
+    );
 
     if (isLoading && runs.length === 0) {
         return (
@@ -410,6 +439,19 @@ export default function RunsPage() {
                                                     </TableCell>
                                                     <TableCell className="text-sm">
                                                         <div className="flex items-center space-x-1">
+                                                            {run.initial_context && (
+                                                                <Tooltip>
+                                                                    <TooltipTrigger asChild>
+                                                                        <Info className="h-4 w-4 text-green-600 cursor-pointer" />
+                                                                    </TooltipTrigger>
+                                                                    <TooltipContent sideOffset={4} className="max-w-sm whitespace-pre-wrap break-words">
+                                                                        <p className="font-semibold text-xs mb-1">Initial Context</p>
+                                                                        <pre className="max-w-sm whitespace-pre-wrap break-words text-xs">
+                                                                            {JSON.stringify(run.initial_context, null, 2)}
+                                                                        </pre>
+                                                                    </TooltipContent>
+                                                                </Tooltip>
+                                                            )}
                                                             {run.gathered_context && (
                                                                 <Tooltip>
                                                                     <TooltipTrigger asChild>
@@ -436,7 +478,7 @@ export default function RunsPage() {
                                                                     </TooltipContent>
                                                                 </Tooltip>
                                                             )}
-                                                            {!run.gathered_context && !run.usage_info && (
+                                                            {!run.initial_context && !run.gathered_context && !run.usage_info && (
                                                                 <span className="text-muted-foreground">-</span>
                                                             )}
                                                         </div>
@@ -509,6 +551,38 @@ export default function RunsPage() {
                                                                     height={16}
                                                                     className="h-4 w-4"
                                                                 />
+                                                            </Button>
+
+                                                            {/* Quick links open the regular app after impersonating the
+                                                                owner of the workflow run. */}
+                                                            <Button
+                                                                variant="outline"
+                                                                size="icon"
+                                                                title="Open workflow as user"
+                                                                disabled={!run.user_id}
+                                                                onClick={() => {
+                                                                    impersonateAndMaybeRedirect(
+                                                                        run.user_id,
+                                                                        `/workflow/${run.workflow_id}`,
+                                                                    );
+                                                                }}
+                                                            >
+                                                                <ExternalLink className="h-4 w-4" />
+                                                            </Button>
+
+                                                            <Button
+                                                                variant="outline"
+                                                                size="icon"
+                                                                title="Open run details as user"
+                                                                disabled={!run.user_id}
+                                                                onClick={() => {
+                                                                    impersonateAndMaybeRedirect(
+                                                                        run.user_id,
+                                                                        `/workflow/${run.workflow_id}/run/${run.id}`,
+                                                                    );
+                                                                }}
+                                                            >
+                                                                <FileText className="h-4 w-4" />
                                                             </Button>
 
                                                         </div>

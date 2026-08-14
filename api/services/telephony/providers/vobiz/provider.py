@@ -14,9 +14,11 @@ from fastapi import HTTPException
 from loguru import logger
 
 from api.enums import TelephonyCallStatus, WorkflowRunMode
+from api.services.telephony import ws_auth
 from api.services.telephony.base import (
     CallInitiationResult,
     NormalizedInboundData,
+    ProviderPhoneNumberLookupError,
     ProviderSyncResult,
     TelephonyProvider,
 )
@@ -125,7 +127,6 @@ class VobizProvider(TelephonyProvider):
             async with session.post(endpoint, json=data, headers=headers) as response:
                 if response.status != 201:
                     error_data = await response.text()
-                    logger.error(f"Vobiz API error: {error_data}")
                     raise HTTPException(
                         status_code=response.status,
                         detail=f"Failed to initiate Vobiz call: {error_data}",
@@ -143,9 +144,6 @@ class VobizProvider(TelephonyProvider):
                 )
 
                 if not call_id:
-                    logger.error(
-                        f"No call ID found in Vobiz response. Available keys: {list(response_data.keys())}"
-                    )
                     raise HTTPException(
                         status_code=response.status,
                         detail=f"Vobiz API response missing call identifier. Response: {response_data}"
@@ -264,10 +262,13 @@ class VobizProvider(TelephonyProvider):
         - contentType: audio/x-mulaw;rate=8000
         """
         _, wss_backend_endpoint = await get_backend_endpoints()
+        ws_url = ws_auth.build_media_ws_url(
+            wss_backend_endpoint, workflow_id, organization_id, workflow_run_id
+        )
 
         vobiz_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Stream bidirectional="true" keepCallAlive="true" contentType="audio/x-mulaw;rate=8000">{wss_backend_endpoint}/api/v1/telephony/ws/{workflow_id}/{organization_id}/{workflow_run_id}</Stream>
+    <Stream bidirectional="true" keepCallAlive="true" contentType="audio/x-mulaw;rate=8000">{ws_url}</Stream>
 </Response>"""
         return vobiz_xml
 
@@ -371,39 +372,34 @@ class VobizProvider(TelephonyProvider):
 
         logger.debug(f"Vobiz WebSocket connected for workflow_run {workflow_run_id}")
 
-        try:
-            # Extract stream_id and call_id from the start event
-            start_data = start_msg.get("start", {})
-            stream_id = start_data.get("streamId")
-            call_id = start_data.get("callId")
+        # Extract stream_id and call_id from the start event
+        start_data = start_msg.get("start", {})
+        stream_id = start_data.get("streamId")
+        call_id = start_data.get("callId")
 
-            if not stream_id or not call_id:
-                logger.error(f"Missing streamId or callId in start event: {start_data}")
-                await websocket.close(code=4400, reason="Missing streamId or callId")
-                return
+        if not stream_id or not call_id:
+            logger.error(f"Missing streamId or callId in start event: {start_data}")
+            await websocket.close(code=4400, reason="Missing streamId or callId")
+            return
 
-            logger.info(
-                f"[run {workflow_run_id}] Starting Vobiz WebSocket handler - "
-                f"stream_id: {stream_id}, call_id: {call_id}"
-            )
+        logger.info(
+            f"[run {workflow_run_id}] Starting Vobiz WebSocket handler - "
+            f"stream_id: {stream_id}, call_id: {call_id}"
+        )
 
-            await run_pipeline_telephony(
-                websocket,
-                provider_name=self.PROVIDER_NAME,
-                workflow_id=workflow_id,
-                workflow_run_id=workflow_run_id,
-                organization_id=organization_id,
-                call_id=call_id,
-                transport_kwargs={"stream_id": stream_id, "call_id": call_id},
-            )
+        # Failures propagate untouched: the pipeline reports them with the
+        # traceback, and catching to re-log here would split one failure in two.
+        await run_pipeline_telephony(
+            websocket,
+            provider_name=self.PROVIDER_NAME,
+            workflow_id=workflow_id,
+            workflow_run_id=workflow_run_id,
+            organization_id=organization_id,
+            call_id=call_id,
+            transport_kwargs={"stream_id": stream_id, "call_id": call_id},
+        )
 
-            logger.info(f"[run {workflow_run_id}] Vobiz pipeline completed")
-
-        except Exception as e:
-            logger.error(
-                f"[run {workflow_run_id}] Error in Vobiz WebSocket handler: {e}"
-            )
-            raise
+        logger.info(f"[run {workflow_run_id}] Vobiz pipeline completed")
 
     # ======== INBOUND CALL METHODS ========
 
@@ -513,7 +509,7 @@ class VobizProvider(TelephonyProvider):
         - Attach: https://vobiz.ai/docs/applications/attach-number
         - Detach: https://vobiz.ai/docs/applications/detach-number
         """
-        if not self.validate_config():
+        if not (self.auth_id and self.auth_token):
             return ProviderSyncResult(
                 ok=False, message="Vobiz provider not properly configured"
             )
@@ -659,6 +655,70 @@ class VobizProvider(TelephonyProvider):
             f"{self.application_id}; answer_url set to {webhook_url}"
         )
         return ProviderSyncResult(ok=True)
+
+    async def validate_phone_number(self, address: str) -> ProviderSyncResult:
+        """Verify PSTN ownership through Vobiz's account number inventory."""
+        normalized = normalize_telephony_address(address)
+        if normalized.address_type != "pstn":
+            return ProviderSyncResult(ok=True)
+        if not (self.auth_id and self.auth_token):
+            raise ProviderPhoneNumberLookupError(
+                "Vobiz auth ID and auth token are required to validate "
+                "phone-number ownership"
+            )
+
+        endpoint = f"{self.base_url}/v1/Account/{self.auth_id}/numbers"
+        headers = {
+            "X-Auth-ID": self.auth_id,
+            "X-Auth-Token": self.auth_token,
+            "Content-Type": "application/json",
+        }
+        page = 1
+        per_page = 100
+        try:
+            async with aiohttp.ClientSession() as session:
+                while True:
+                    params = {
+                        "page": page,
+                        "per_page": per_page,
+                        "search": normalized.canonical,
+                    }
+                    async with session.get(
+                        endpoint, params=params, headers=headers
+                    ) as response:
+                        if response.status != 200:
+                            body = await response.text()
+                            raise ProviderPhoneNumberLookupError(
+                                f"Vobiz API {response.status}: {body}"
+                            )
+                        data = await response.json()
+
+                    items = data.get("items") or []
+                    for item in items:
+                        if item.get("e164") == normalized.canonical:
+                            return ProviderSyncResult(ok=True)
+
+                    total = int(data.get("total") or len(items))
+                    response_page = int(data.get("page") or page)
+                    response_per_page = int(data.get("per_page") or per_page)
+                    if not items or response_page * response_per_page >= total:
+                        break
+                    page = response_page + 1
+        except ProviderPhoneNumberLookupError:
+            raise
+        except Exception as e:
+            raise ProviderPhoneNumberLookupError(
+                f"Vobiz phone-number lookup failed: {e}"
+            ) from e
+
+        return ProviderSyncResult(
+            ok=False,
+            message=(
+                f"Phone number {normalized.canonical} is not owned by this "
+                f"Vobiz account ({self.auth_id}). Add it in the Vobiz "
+                "console first."
+            ),
+        )
 
     async def start_inbound_stream(
         self,

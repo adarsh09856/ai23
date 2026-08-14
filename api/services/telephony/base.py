@@ -41,6 +41,44 @@ class ProviderSyncResult:
     message: Optional[str] = None  # human-readable detail when ok=False
 
 
+@dataclass(frozen=True)
+class SIPTransportDetails:
+    """Connection details for one supported inbound SIP transport."""
+
+    transport: str
+    hostname: str
+    port: int
+    uri: str
+
+
+@dataclass(frozen=True)
+class SIPRegionDetails:
+    """Inbound and outbound SIP details for one provider region."""
+
+    region: str
+    inbound_transports: list[SIPTransportDetails]
+    outbound_origin_ip: str
+
+
+@dataclass(frozen=True)
+class SIPConnectivityDetails:
+    """Provider-supplied SIP connection details displayed to customers."""
+
+    provider_display_name: str
+    regions: list[SIPRegionDetails]
+
+
+class ProviderPhoneNumberLookupError(Exception):
+    """The provider could not determine whether it owns a phone number.
+
+    This is distinct from a successful lookup that reports ``ok=False``. The
+    latter means the address is definitely absent from the provider account;
+    this exception means credentials, transport, or the upstream API failed,
+    so callers should surface a provider error instead of treating the number
+    as unowned.
+    """
+
+
 @dataclass
 class NormalizedInboundData:
     """Standardized inbound call data across all providers."""
@@ -244,6 +282,15 @@ class TelephonyProvider(ABC):
         """Parse provider-specific callback data into a normalized AMD result."""
         return None
 
+    def get_sip_connectivity_details(self) -> SIPConnectivityDetails | None:
+        """Return inbound SIP trunk details when this provider supports them.
+
+        Providers opt in by overriding this method. Keeping the default empty
+        lets the configuration UI render the SIP panel generically without a
+        hard-coded list of capable providers.
+        """
+        return None
+
     @abstractmethod
     async def handle_websocket(
         self,
@@ -413,6 +460,26 @@ class TelephonyProvider(ABC):
         don't support programmatic webhook configuration (e.g. ARI).
         """
         return ProviderSyncResult(ok=True)
+
+    async def provision_phone_number(self, address: str) -> ProviderSyncResult | None:
+        """Provision ``address`` at the provider before storing it locally.
+
+        The default ``None`` means the provider does not support provisioning,
+        so the shared route falls back to the read-only ownership validation
+        below. Providers that opt in must make this operation idempotent.
+        """
+        return None
+
+    @abstractmethod
+    async def validate_phone_number(self, address: str) -> ProviderSyncResult:
+        """Check that ``address`` belongs to this provider configuration.
+
+        Carrier-backed providers implement a read-only account-inventory
+        lookup. PBX-managed providers without a carrier ownership resource
+        must explicitly opt out so a newly registered provider cannot silently
+        bypass validation.
+        """
+        raise NotImplementedError
 
     @staticmethod
     @abstractmethod

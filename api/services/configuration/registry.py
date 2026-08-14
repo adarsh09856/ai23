@@ -1,4 +1,5 @@
 import random
+from collections.abc import Iterable
 from enum import Enum, auto
 from typing import Annotated, Dict, Literal, Type, TypeVar, Union
 
@@ -65,6 +66,7 @@ class ServiceType(Enum):
 
 class ServiceProviders(str, Enum):
     OPENAI = "openai"
+    ATLASCLOUD = "atlascloud"
     DEEPGRAM = "deepgram"
     GROQ = "groq"
     OPENROUTER = "openrouter"
@@ -99,45 +101,9 @@ class ServiceProviders(str, Enum):
 
 
 class BaseServiceConfiguration(BaseModel):
-    """
-    Base configuration for all AI service providers (LLM, TTS, STT, Embeddings, Realtime).
-    
-    ARCHITECTURE: User-Owned Provider Keys (BYOK - Bring Your Own Key)
-    ----------------------------------------------------------------
-    Dograh uses a BYOK architecture where users and organizations provide their own
-    API keys for third-party AI providers (OpenAI, Claude, Deepgram, ElevenLabs, etc).
-    
-    - Users configure their own provider credentials via the UI or API
-    - Keys are stored per-organization in organization_configurations table
-    - Admin does NOT store shared production keys for all users
-    - Admin CAN control provider visibility, policy, and defaults
-    
-    Multi-Key Rotation (Native Support):
-    ------------------------------------
-    The api_key field accepts either a single string or a list of strings.
-    When multiple keys are provided, __getattribute__ randomly selects one on each access.
-    This enables:
-    - Load distribution across multiple API keys
-    - Rate limit avoidance
-    - Automatic failover without code changes
-    
-    Validation & Masking:
-    ---------------------
-    - User-provided keys are validated before save (check_validity.py)
-    - Keys are masked in API responses (masking.py)
-    - Validation state is cached with last_validated_at timestamp
-    
-    Example Configuration:
-    ----------------------
-    {
-        "provider": "openai",
-        "api_key": ["sk-proj-abc123", "sk-proj-def456"],  # Multi-key rotation
-        "model": "gpt-4"
-    }
-    """
-    
     provider: Literal[
         ServiceProviders.OPENAI,
+        ServiceProviders.ATLASCLOUD,
         ServiceProviders.DEEPGRAM,
         ServiceProviders.GROQ,
         ServiceProviders.OPENROUTER,
@@ -225,6 +191,50 @@ REGISTRY: Dict[ServiceType, Dict[str, Type[BaseServiceConfiguration]]] = {
 T = TypeVar("T", bound=BaseServiceConfiguration)
 
 
+def registered_provider_names(
+    service_types: Iterable[ServiceType] | None = None,
+) -> tuple[str, ...]:
+    """Return canonical provider IDs from the live configuration registry."""
+
+    selected_types = (
+        tuple(service_types) if service_types is not None else tuple(REGISTRY)
+    )
+    providers = {
+        str(getattr(provider, "value", provider))
+        for service_type in selected_types
+        for provider in REGISTRY.get(service_type, {})
+    }
+    return tuple(sorted(provider for provider in providers if provider))
+
+
+def match_registered_provider(
+    candidate: str,
+    *,
+    service_types: Iterable[ServiceType] | None = None,
+) -> str | None:
+    """Find a registered provider ID embedded in a runtime class/name hint.
+
+    Separators and case are ignored, and the most specific (longest) provider
+    ID wins. This keeps best-effort runtime discovery tied to registrations
+    instead of maintaining another provider catalog at each consumer.
+    """
+
+    compact_candidate = "".join(
+        character for character in candidate.casefold() if character.isalnum()
+    )
+    matches: list[tuple[int, str]] = []
+    for provider in registered_provider_names(service_types):
+        compact_provider = "".join(
+            character for character in provider.casefold() if character.isalnum()
+        )
+        if compact_provider and compact_provider in compact_candidate:
+            matches.append((len(compact_provider), provider))
+
+    if not matches:
+        return None
+    return max(matches, key=lambda match: (match[0], match[1]))[1]
+
+
 def register_service(service_type: ServiceType):
     """Generic decorator for registering service configurations"""
 
@@ -282,6 +292,10 @@ def provider_model_config(
 
 # Suggested models for each provider (used for UI dropdown)
 OPENAI_PROVIDER_MODEL_CONFIG = provider_model_config("OpenAI")
+ATLASCLOUD_PROVIDER_MODEL_CONFIG = provider_model_config(
+    "Atlas Cloud",
+    description="Atlas Cloud OpenAI-compatible LLM API.",
+)
 GOOGLE_PROVIDER_MODEL_CONFIG = provider_model_config("Google")
 GROQ_PROVIDER_MODEL_CONFIG = provider_model_config("Groq")
 OPENROUTER_PROVIDER_MODEL_CONFIG = provider_model_config("Open Router")
@@ -350,6 +364,11 @@ OPENAI_MODELS = [
     "gpt-3.5-turbo",
 ]
 
+ATLASCLOUD_MODELS = [
+    "qwen/qwen3.5-flash",
+    "deepseek-ai/deepseek-v4-pro",
+]
+
 GROQ_MODELS = [
     "llama-3.3-70b-versatile",
     "deepseek-r1-distill-llama-70b",
@@ -395,11 +414,26 @@ class OpenAILLMService(BaseLLMConfiguration):
 
 
 @register_llm
+class AtlasCloudLLMService(BaseLLMConfiguration):
+    model_config = ATLASCLOUD_PROVIDER_MODEL_CONFIG
+    provider: Literal[ServiceProviders.ATLASCLOUD] = ServiceProviders.ATLASCLOUD
+    model: str = Field(
+        default="qwen/qwen3.5-flash",
+        description="Atlas Cloud OpenAI-compatible chat model identifier.",
+        json_schema_extra={"examples": ATLASCLOUD_MODELS, "allow_custom_input": True},
+    )
+    base_url: str = Field(
+        default="https://api.atlascloud.ai/v1",
+        description="Atlas Cloud OpenAI-compatible API endpoint.",
+    )
+
+
+@register_llm
 class GoogleLLMService(BaseLLMConfiguration):
     model_config = GOOGLE_PROVIDER_MODEL_CONFIG
     provider: Literal[ServiceProviders.GOOGLE] = ServiceProviders.GOOGLE
     model: str = Field(
-        default="gemini-2.5-flash",
+        default="gemini-3.5-flash",
         description="Gemini model on Google AI Studio (not Vertex).",
         json_schema_extra={"examples": GOOGLE_MODELS, "allow_custom_input": True},
     )
@@ -410,7 +444,7 @@ class GoogleVertexLLMConfiguration(BaseLLMConfiguration):
     model_config = GOOGLE_VERTEX_PROVIDER_MODEL_CONFIG
     provider: Literal[ServiceProviders.GOOGLE_VERTEX] = ServiceProviders.GOOGLE_VERTEX
     model: str = Field(
-        default="gemini-2.5-flash",
+        default="gemini-3.5-flash",
         description="Gemini model on Vertex AI.",
         json_schema_extra={
             "examples": GOOGLE_VERTEX_MODELS,
@@ -605,11 +639,8 @@ class SarvamLLMConfiguration(BaseLLMConfiguration):
     model_config = SARVAM_PROVIDER_MODEL_CONFIG
     provider: Literal[ServiceProviders.SARVAM] = ServiceProviders.SARVAM
     model: str = Field(
-        default="sarvam-30b",
-        description=(
-            "Sarvam chat model. Use sarvam-30b for low-latency voice agents; "
-            "sarvam-105b for complex multi-step reasoning."
-        ),
+        default="sarvam-105b",
+        description="Sarvam chat model.",
         json_schema_extra={"examples": SARVAM_LLM_MODELS, "allow_custom_input": True},
     )
     temperature: float = Field(
@@ -762,6 +793,12 @@ class GoogleRealtimeLLMConfiguration(BaseLLMConfiguration):
             "allow_custom_input": True,
         },
     )
+    temperature: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=2.0,
+        description="Sampling temperature for Gemini Live (0.0 to 2.0).",
+    )
 
 
 @register_service(ServiceType.REALTIME)
@@ -793,6 +830,12 @@ class GoogleVertexRealtimeLLMConfiguration(BaseLLMConfiguration):
             "examples": GOOGLE_VERTEX_REALTIME_LANGUAGES,
             "allow_custom_input": True,
         },
+    )
+    temperature: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=2.0,
+        description="Sampling temperature for Gemini Live (0.0 to 2.0).",
     )
     project_id: str = Field(description="Google Cloud project ID for Vertex AI.")
     location: str = Field(
@@ -864,6 +907,7 @@ REALTIME_PROVIDERS = {
 LLMConfig = Annotated[
     Union[
         OpenAILLMService,
+        AtlasCloudLLMService,
         GoogleVertexLLMConfiguration,
         GroqLLMService,
         OpenRouterLLMConfiguration,
@@ -1447,7 +1491,7 @@ class DeepgramSTTConfiguration(BaseSTTConfiguration):
     model: str = Field(
         default="nova-3-general",
         description="Deepgram STT model.",
-        json_schema_extra={"examples": DEEPGRAM_STT_MODELS},
+        json_schema_extra={"examples": DEEPGRAM_STT_MODELS, "allow_custom_input": True},
     )
     language: str = Field(
         default="multi",
@@ -1457,8 +1501,10 @@ class DeepgramSTTConfiguration(BaseSTTConfiguration):
         ),
         json_schema_extra={
             "examples": DEEPGRAM_LANGUAGES,
+            "allow_custom_input": True,
             "model_options": {
                 "nova-3-general": DEEPGRAM_LANGUAGES,
+                "nova-3-medical": DEEPGRAM_LANGUAGES,
                 "flux-general-en": ("en",),
                 "flux-general-multi": DEEPGRAM_FLUX_MULTILINGUAL_LANGUAGE_OPTIONS,
             },

@@ -130,12 +130,22 @@ class Node:
         self.document_uuids = getattr(data, "document_uuids", None)
         self.mcp_tool_filters = getattr(data, "mcp_tool_filters", None)
         self.pre_call_fetch_enabled = getattr(data, "pre_call_fetch_enabled", False)
+        mode = getattr(data, "pre_call_fetch_mode", None)
+        self.pre_call_fetch_mode = (mode.value if hasattr(mode, "value") else mode) or (
+            "always" if self.pre_call_fetch_enabled else "disabled"
+        )
         self.pre_call_fetch_url = getattr(data, "pre_call_fetch_url", None)
         self.pre_call_fetch_credential_uuid = getattr(
             data, "pre_call_fetch_credential_uuid", None
         )
 
         self.data = data
+
+    def should_run_pre_call_fetch(self, direction: str | None) -> bool:
+        """Return whether the Start-node fetch applies to this execution."""
+        if self.pre_call_fetch_mode == "always":
+            return True
+        return self.pre_call_fetch_mode == direction
 
 
 def _instance_constraint_message(
@@ -261,6 +271,13 @@ class WorkflowGraph:
             ][0]
         except IndexError:
             self.global_node_id = None
+
+    def uses_variable_extraction(self) -> bool:
+        """Return whether any node has a usable variable-extraction config."""
+        return any(
+            node.extraction_enabled and node.extraction_variables
+            for node in self.nodes.values()
+        )
 
     # -----------------------------------------------------------
     # template variable extraction

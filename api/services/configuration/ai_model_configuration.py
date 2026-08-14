@@ -7,16 +7,10 @@ from typing import Literal
 
 from loguru import logger
 from pydantic import ValidationError
-from sqlalchemy import select, update
-from sqlalchemy.orm import selectinload
 
 from api.constants import MPS_API_URL
 from api.db import db_client
-from api.db.models import (
-    OrganizationConfigurationModel,
-    WorkflowDefinitionModel,
-    WorkflowModel,
-)
+from api.db.models import OrganizationConfigurationModel
 from api.enums import OrganizationConfigurationKey
 from api.schemas.ai_model_configuration import (
     DOGRAH_DEFAULT_LANGUAGE,
@@ -37,7 +31,6 @@ from api.services.configuration.masking import (
     mask_key,
     resolve_masked_api_keys,
 )
-from api.services.configuration.admin_key_injection import inject_admin_keys
 from api.services.configuration.registry import ServiceProviders
 from api.services.configuration.resolve import resolve_effective_config
 
@@ -77,16 +70,12 @@ async def get_resolved_ai_model_configuration(
             effective.last_validated_at = (
                 organization_configuration_row.last_validated_at
             )
-        # Inject admin-managed provider keys where the org has none (admin-key platform mode)
-        effective = await inject_admin_keys(effective)
         return ResolvedAIModelConfiguration(
             effective=effective,
             source="organization_v2",
             organization_configuration=organization_configuration,
         )
 
-    # Even with no org config, try to build a default effective config from admin keys
-    # so that a brand-new org can still make calls with the platform defaults
     return ResolvedAIModelConfiguration(
         effective=EffectiveAIModelConfiguration(),
         source="empty",
@@ -103,19 +92,17 @@ async def get_effective_ai_model_configuration_for_workflow(
         WORKFLOW_MODEL_CONFIGURATION_V2_OVERRIDE_KEY
     )
     if v2_override:
-        effective = compile_ai_model_configuration_v2(
+        return compile_ai_model_configuration_v2(
             OrganizationAIModelConfigurationV2.model_validate(v2_override)
         )
-        return await inject_admin_keys(effective)
 
     resolved_config = await get_resolved_ai_model_configuration(
         organization_id=organization_id,
     )
-    effective = resolve_effective_config(
+    return resolve_effective_config(
         resolved_config.effective,
         workflow_configurations.get("model_overrides"),
     )
-    return await inject_admin_keys(effective)
 
 
 async def get_organization_ai_model_configuration_v2(
@@ -179,7 +166,9 @@ async def migrate_workflow_model_configurations_to_v2(
     organization_id: int,
     fallback_user_config: EffectiveAIModelConfiguration,
 ) -> WorkflowAIModelConfigurationMigrationResult:
-    workflows = await _list_workflows_for_model_configuration_migration(organization_id)
+    workflows = await db_client.list_workflows_for_model_configuration_migration(
+        organization_id
+    )
     workflow_updates: list[tuple[int, dict]] = []
     definition_updates: list[tuple[int, dict]] = []
     migrated_workflow_ids: set[int] = set()
@@ -209,20 +198,11 @@ async def migrate_workflow_model_configurations_to_v2(
                 migrated_workflow_ids.add(workflow.id)
 
     if workflow_updates or definition_updates:
-        async with db_client.async_session() as session:
-            for workflow_id, workflow_configs in workflow_updates:
-                await session.execute(
-                    update(WorkflowModel)
-                    .where(WorkflowModel.id == workflow_id)
-                    .values(workflow_configurations=workflow_configs)
-                )
-            for definition_id, definition_configs in definition_updates:
-                await session.execute(
-                    update(WorkflowDefinitionModel)
-                    .where(WorkflowDefinitionModel.id == definition_id)
-                    .values(workflow_configurations=definition_configs)
-                )
-            await session.commit()
+        await db_client.bulk_update_workflow_model_configurations(
+            organization_id=organization_id,
+            workflow_updates=workflow_updates,
+            definition_updates=definition_updates,
+        )
 
     return WorkflowAIModelConfigurationMigrationResult(
         workflow_count=len(migrated_workflow_ids),
@@ -381,18 +361,6 @@ def _merge_byok_secret_fields(incoming_byok: dict | None, existing_byok: dict | 
         existing_section = existing_container.get(section_name)
         if isinstance(incoming_section, dict) and isinstance(existing_section, dict):
             _merge_service_secret_fields(incoming_section, existing_section)
-
-
-async def _list_workflows_for_model_configuration_migration(
-    organization_id: int,
-) -> list[WorkflowModel]:
-    async with db_client.async_session() as session:
-        result = await session.execute(
-            select(WorkflowModel)
-            .options(selectinload(WorkflowModel.definitions))
-            .where(WorkflowModel.organization_id == organization_id)
-        )
-        return list(result.scalars().unique().all())
 
 
 def _merge_service_secret_fields(incoming: dict, existing: dict):
