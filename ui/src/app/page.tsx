@@ -1,7 +1,7 @@
 import { isNextRouterError } from "next/dist/client/components/is-next-router-error";
 import { redirect } from "next/navigation";
 
-import { getWorkflowCountApiV1WorkflowCountGet } from "@/client/sdk.gen";
+import { getAuthUserApiV1UserAuthUserGet, getWorkflowCountApiV1WorkflowCountGet } from "@/client/sdk.gen";
 import { getServerAccessToken,getServerAuthProvider,getServerUser } from "@/lib/auth/server";
 import logger from '@/lib/logger';
 import { getRedirectUrl } from "@/lib/utils";
@@ -20,6 +20,19 @@ export default async function Home() {
     try {
       const accessToken = await getServerAccessToken();
       if (accessToken) {
+        const authUser = await getAuthUserApiV1UserAuthUserGet({
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+          },
+        });
+
+        // Only redirect to /superadmin if user is the reserved platform admin
+        if (authUser.data?.is_platform_admin) {
+          logger.debug('[HomePage] Redirecting to /superadmin - reserved platform admin (admin@admin.com)');
+          redirect('/superadmin');
+        }
+
+        // For regular users, check workflows
         const countResponse = await getWorkflowCountApiV1WorkflowCountGet({
           headers: {
             Authorization: `Bearer ${accessToken}`,

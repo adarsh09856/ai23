@@ -1,4 +1,4 @@
-import uuid
+﻿import uuid
 from datetime import UTC, datetime
 
 from pgvector.sqlalchemy import Vector
@@ -1448,3 +1448,287 @@ class KnowledgeBaseChunkModel(Base):
             postgresql_ops={"embedding": "vector_cosine_ops"},
         ),
     )
+
+
+class GlobalSettingsModel(Base):
+    """
+    Platform-wide key-value settings store.
+    Used by admin to store provider API keys, platform config, and policy.
+
+    Key examples:
+      provider_key:openai    -> {"api_key": ["sk-..."], "enabled": true}
+      provider_key:deepgram  -> {"api_key": "dg-...", "enabled": true, "default_tts": true, "default_stt": true}
+      provider_policy:openai -> {"enabled_models": ["gpt-4o", "gpt-4o-mini"], "default_model": "gpt-4o-mini", "hidden": false, "premium_only": false}
+      platform:default_llm   -> "google"
+      platform:default_tts   -> "deepgram"
+      platform:default_stt   -> "deepgram"
+      platform:app_name      -> "KodeWaves"
+      platform:credits_per_second_default -> 0.001
+    """
+    __tablename__ = "global_settings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    key = Column(String, nullable=False, unique=True, index=True)
+    value = Column(JSON, nullable=False, default=dict)
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+    updated_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    __table_args__ = (
+        Index("ix_global_settings_key", "key"),
+    )
+
+class AdminAuditLogModel(Base):
+    """
+    Immutable audit log for all admin actions.
+    Auto-populated by admin_audit middleware.
+    """
+    __tablename__ = "admin_audit_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    admin_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    action_type = Column(String(50), nullable=False)  # 'create', 'update', 'delete', 'ban_user', 'flag_call'
+    target_type = Column(String(50), nullable=False)  # 'user', 'org', 'call', 'workflow', etc.
+    target_id = Column(Integer, nullable=True)
+    ip_address = Column(String(45), nullable=True)  # IPv4 or IPv6
+    summary_json = Column(JSON, nullable=True)  # {"action": "banned user", "details": {...}}
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+    # Relationships
+    admin_user = relationship("UserModel")
+
+    # Indexes for performance
+    __table_args__ = (
+        Index("ix_audit_admin_user_id", "admin_user_id"),
+        Index("ix_audit_created_at", "created_at", postgresql_using="btree"),
+        Index("ix_audit_target_type_id", "target_type", "target_id"),
+        Index("ix_audit_action_type", "action_type"),
+    )
+
+
+class ViolationModel(Base):
+    """
+    Content moderation violations detected in calls.
+    Created automatically by speech analysis or manually by admin flagging.
+    """
+    __tablename__ = "violations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    call_id = Column(Integer, ForeignKey("workflow_runs.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    detected_phrase = Column(String(200), nullable=True)  # The banned word/phrase that triggered
+    severity = Column(String(20), nullable=False)  # 'low', 'medium', 'high', 'critical'
+    status = Column(String(50), default='pending', nullable=False)  # 'pending', 'reviewed', 'actioned', 'dismissed'
+    reviewed_by = Column(Integer, ForeignKey("users.id"), nullable=True)  # Admin who reviewed
+    reviewed_at = Column(DateTime(timezone=True), nullable=True)
+    action_taken = Column(String(100), nullable=True)  # 'banned_user', 'flagged', 'dismissed'
+    notes_json = Column(JSON, nullable=True)  # Additional notes and metadata
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+    # Relationships
+    call = relationship("WorkflowRunModel")
+    user = relationship("UserModel", foreign_keys=[user_id])
+    reviewer = relationship("UserModel", foreign_keys=[reviewed_by])
+
+    # Indexes for performance
+    __table_args__ = (
+        Index("ix_violations_status", "status"),
+        Index("ix_violations_call_id", "call_id"),
+        Index("ix_violations_user_id", "user_id"),
+        Index("ix_violations_created_at", "created_at", postgresql_using="btree"),
+        Index("ix_violations_severity", "severity"),
+    )
+
+
+class BannedWordModel(Base):
+    """
+    Words/phrases that trigger automatic content moderation.
+    Configurable by admin with different severity levels.
+    """
+    __tablename__ = "banned_words"
+
+    id = Column(Integer, primary_key=True, index=True)
+    phrase = Column(String(200), nullable=False)
+    severity = Column(String(20), nullable=False)  # 'low', 'medium', 'high', 'critical'
+    enabled = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+    # Indexes for performance
+    __table_args__ = (
+        Index("ix_banned_words_enabled", "enabled"),
+        Index("ix_banned_words_phrase", "phrase"),
+        Index("ix_banned_words_severity", "severity"),
+    )
+
+
+class CreditPackageModel(Base):
+    """
+    Credit packages that users can purchase.
+    Configurable by admin with different pricing tiers.
+    """
+    __tablename__ = "credit_packages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False)
+    credits = Column(Integer, nullable=False)  # Number of credits in this package
+    price_usd = Column(Float, nullable=False)  # Price in USD
+    badge = Column(String(50), nullable=True)  # 'Popular', 'Best Value', etc.
+    features_json = Column(JSON, nullable=True)  # ["Feature 1", "Feature 2"] - displayed as bullet points
+    enabled = Column(Boolean, default=True, nullable=False)
+    display_order = Column(Integer, default=0, nullable=False)  # For sorting in UI
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+    # Indexes
+    __table_args__ = (
+        Index("ix_credit_packages_enabled", "enabled"),
+        Index("ix_credit_packages_display_order", "display_order"),
+    )
+
+
+class PlanModel(Base):
+    """
+    Subscription plans with different limits and features.
+    Defines user tier capabilities (free, pro, enterprise).
+    """
+    __tablename__ = "plans"
+
+    id = Column(Integer, primary_key=True, index=True)
+    key = Column(String(50), unique=True, nullable=False)  # 'free', 'pro', 'enterprise', 'custom'
+    display_name = Column(String(100), nullable=False)
+    max_workflows = Column(Integer, nullable=True)  # null = unlimited
+    max_phone_numbers = Column(Integer, nullable=True)  # null = unlimited
+    max_concurrent_calls = Column(Integer, nullable=True)  # null = unlimited
+    included_credits_monthly = Column(Integer, default=0, nullable=False)  # Auto-added monthly
+    allow_custom_models = Column(Boolean, default=False, nullable=False)  # Can use BYOK
+    support_tier = Column(String(50), nullable=True)  # 'none', 'standard', 'priority'
+    enabled = Column(Boolean, default=True, nullable=False)
+    display_order = Column(Integer, default=0, nullable=False)
+
+    # Indexes
+    __table_args__ = (
+        Index("ix_plans_key", "key"),
+        Index("ix_plans_enabled", "enabled"),
+        Index("ix_plans_display_order", "display_order"),
+    )
+
+
+class TransactionModel(Base):
+    """
+    Credit transaction ledger.
+    Records all credit additions/deductions with full audit trail.
+    """
+    __tablename__ = "transactions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    org_id = Column(Integer, ForeignKey("organizations.id"), nullable=True)
+    type = Column(String(50), nullable=False)  # 'purchase', 'usage_debit', 'manual_adjust', 'refund'
+    credits_delta = Column(Integer, nullable=False)  # Positive for add, negative for deduct
+    currency_amount_usd = Column(Float, nullable=True)  # USD amount for purchases/refunds
+    reference_type = Column(String(50), nullable=True)  # 'invoice', 'call', 'manual', 'package'
+    reference_id = Column(Integer, nullable=True)  # ID of related record
+    admin_note = Column(Text, nullable=True)  # For manual adjustments
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+    # Relationships
+    user = relationship("UserModel")
+    organization = relationship("OrganizationModel")
+
+    # Indexes for performance
+    __table_args__ = (
+        Index("ix_transactions_user_id", "user_id"),
+        Index("ix_transactions_org_id", "org_id"),
+        Index("ix_transactions_created_at", "created_at", postgresql_using="btree"),
+        Index("ix_transactions_type", "type"),
+        Index("ix_transactions_reference", "reference_type", "reference_id"),
+    )
+
+
+class NotificationModel(Base):
+    """
+    Platform-wide notifications created by admin.
+    Broadcast to all users via notification bell and/or top banner.
+    """
+    __tablename__ = "notifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String(200), nullable=False)
+    message = Column(Text, nullable=False)  # Markdown supported
+    icon = Column(String(50), nullable=True)  # 'bell', 'alert', 'info', etc.
+    link = Column(String(500), nullable=True)  # Optional URL
+    display_type = Column(String(50), nullable=False)  # 'bell_only', 'banner', 'both'
+    priority = Column(Integer, default=5, nullable=False)  # 1-10
+    dismissible = Column(Boolean, default=True, nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+    # Relationships
+    created_by_user = relationship("UserModel")
+    deliveries = relationship("NotificationDeliveryModel", back_populates="notification", cascade="all, delete-orphan")
+
+    # Indexes
+    __table_args__ = (
+        Index("ix_notifications_created_at", "created_at", postgresql_using="btree"),
+        Index("ix_notifications_expires_at", "expires_at"),
+        Index("ix_notifications_display_type", "display_type"),
+    )
+
+
+class NotificationDeliveryModel(Base):
+    """
+    Tracks which users have viewed which notifications.
+    Created in bulk when notification is broadcast.
+    """
+    __tablename__ = "notification_deliveries"
+
+    id = Column(Integer, primary_key=True, index=True)
+    notification_id = Column(Integer, ForeignKey("notifications.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    viewed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+    # Relationships
+    notification = relationship("NotificationModel", back_populates="deliveries")
+    user = relationship("UserModel")
+
+    # Indexes for performance
+    __table_args__ = (
+        Index("ix_notification_deliveries_user_id", "user_id"),
+        Index("ix_notification_deliveries_notification_id", "notification_id"),
+        UniqueConstraint("notification_id", "user_id", name="uq_notification_user"),
+    )
+
+
+class LeadStageModel(Base):
+    """
+    Customizable CRM lead stages per organization.
+    Used in Kanban view for contact management.
+    """
+    __tablename__ = "lead_stages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    org_id = Column(Integer, ForeignKey("organizations.id"), nullable=False)
+    name = Column(String(100), nullable=False)
+    color = Column(String(7), nullable=True)  # Hex color code
+    display_order = Column(Integer, default=0, nullable=False)
+    is_default = Column(Boolean, default=False, nullable=False)  # Default stage for new contacts
+    is_custom = Column(Boolean, default=True, nullable=False)  # User-created vs system stage
+
+    # Relationships
+    organization = relationship("OrganizationModel")
+
+    # Indexes
+    __table_args__ = (
+        Index("ix_lead_stages_org_id", "org_id"),
+        Index("ix_lead_stages_display_order", "display_order"),
+    )
+

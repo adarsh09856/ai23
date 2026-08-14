@@ -1,6 +1,6 @@
-# Kodewaves - Project Overview
+# Dograh - Project Overview
 
-Kodewaves is a voice AI platform for building and deploying conversational AI agents with telephony and WebRTC support.
+Dograh is a voice AI platform for building and deploying conversational AI agents with telephony and WebRTC support.
 
 ## Project Structure
 

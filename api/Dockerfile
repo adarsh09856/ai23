@@ -158,7 +158,6 @@ COPY --chown=dograh:dograh \
      ./scripts/run_arq_worker.sh \
      ./scripts/run_ari_manager.sh \
      ./scripts/run_campaign_orchestrator.sh \
-     ./scripts/run_kodewaves_init.sh \
      ./scripts/drain_web.sh \
      ./scripts/
 

@@ -14,7 +14,7 @@ from api.schemas.workflow_configurations import (
     WorkflowConfigurationDefaults,
     get_default_workflow_configurations,
 )
-from api.services.auth.depends import get_user
+from api.services.auth.depends import PLATFORM_ADMIN_EMAIL, get_user
 from api.services.configuration.ai_model_configuration import (
     convert_legacy_ai_model_configuration_to_v2,
     get_resolved_ai_model_configuration,
@@ -45,6 +45,8 @@ router = APIRouter(prefix="/user")
 class AuthUserResponse(TypedDict):
     id: int
     is_superuser: bool
+    email: str | None
+    is_platform_admin: bool
 
 
 class DefaultConfigurationsResponse(BaseModel):
@@ -90,9 +92,14 @@ async def get_default_configurations() -> DefaultConfigurationsResponse:
 async def get_auth_user(
     user: UserModel = Depends(get_user),
 ) -> AuthUserResponse:
+    normalized_email = (user.email or "").strip().lower()
     return {
         "id": user.id,
         "is_superuser": user.is_superuser,
+        "email": user.email,
+        "is_platform_admin": (
+            user.is_superuser and normalized_email == PLATFORM_ADMIN_EMAIL
+        ),
     }
 
 

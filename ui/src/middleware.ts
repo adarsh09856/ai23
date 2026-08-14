@@ -64,6 +64,35 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(loginUrl);
   }
 
+  // Block /superadmin routes for non-admin@admin.com users
+  if (pathname.startsWith('/superadmin')) {
+    try {
+      const backendUrl = getServerBackendUrl();
+      const res = await fetch(`${backendUrl}/api/v1/user/auth/user`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (res.ok) {
+        const authUser = await res.json();
+        // Only allow admin@admin.com with is_platform_admin flag
+        if (!authUser.is_platform_admin) {
+          const overviewUrl = new URL('/overview', request.url);
+          return NextResponse.redirect(overviewUrl);
+        }
+      } else {
+        // Invalid token, redirect to login
+        const loginUrl = new URL('/auth/login', request.url);
+        return NextResponse.redirect(loginUrl);
+      }
+    } catch {
+      // API error, redirect to overview to be safe
+      const overviewUrl = new URL('/overview', request.url);
+      return NextResponse.redirect(overviewUrl);
+    }
+  }
+
   return NextResponse.next();
 }
 

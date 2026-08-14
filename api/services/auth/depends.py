@@ -1,17 +1,13 @@
-from typing import Annotated, Optional
+from typing import Annotated
 
-import httpx
 from fastapi import Depends, Header, HTTPException, Query, WebSocket
 from loguru import logger
-from pydantic import ValidationError
 
-from api.constants import AUTH_PROVIDER, DOGRAH_MPS_SECRET_KEY, MPS_API_URL
+from api.constants import AUTH_PROVIDER
 from api.db import db_client
 from api.db.models import UserModel
 from api.enums import PostHogEvent
-from api.schemas.ai_model_configuration import EffectiveAIModelConfiguration
 from api.services.auth.stack_auth import stackauth
-from api.services.configuration.registry import ServiceProviders
 from api.services.mps_billing import ensure_hosted_mps_billing_account_v2
 from api.services.posthog_client import (
     POSTHOG_ORGANIZATION_GROUP_TYPE,
@@ -20,6 +16,8 @@ from api.services.posthog_client import (
     set_person_properties,
 )
 from api.utils.auth import decode_jwt_token
+
+PLATFORM_ADMIN_EMAIL = "admin@admin.com"
 
 
 async def require_local_auth() -> None:
@@ -152,29 +150,6 @@ async def get_user(
                         organization.id,
                         exc_info=True,
                     )
-
-                existing_cfg = await db_client.get_user_configurations(user_model.id)
-                if not (existing_cfg.llm or existing_cfg.tts or existing_cfg.stt):
-                    mps_config = await create_user_configuration_with_mps_key(
-                        user_model.id, organization.id, stack_user["id"]
-                    )
-                    if mps_config:
-                        await db_client.update_user_configuration(
-                            user_model.id, mps_config
-                        )
-                        from api.enums import OrganizationConfigurationKey
-                        from api.services.configuration.ai_model_configuration import (
-                            convert_legacy_ai_model_configuration_to_v2,
-                        )
-
-                        model_config_v2 = convert_legacy_ai_model_configuration_to_v2(
-                            mps_config
-                        )
-                        await db_client.upsert_configuration(
-                            organization.id,
-                            OrganizationConfigurationKey.MODEL_CONFIGURATION_V2.value,
-                            model_config_v2.model_dump(mode="json", exclude_none=True),
-                        )
 
     except Exception as exc:
         raise HTTPException(
@@ -345,106 +320,26 @@ async def _handle_api_key_auth(api_key: str) -> UserModel:
     return user
 
 
-async def create_user_configuration_with_mps_key(
-    user_id: int, organization_id: int, user_provider_id: str
-) -> Optional[EffectiveAIModelConfiguration]:
-    """Create user configuration using MPS service key.
-
-    Args:
-        user_id: The user's ID
-        organization_id: The organization's ID
-        user_provider_id: The user's provider ID (for created_by field)
-
-    Returns:
-        EffectiveAIModelConfiguration with MPS-provided API keys or None if failed
-    """
-
-    async with httpx.AsyncClient() as client:
-        # Use MPS API URL from constants
-        if AUTH_PROVIDER == "local":
-            # For local auth mode, create a temporary service key without authentication
-            response = await client.post(
-                f"{MPS_API_URL}/api/v1/service-keys/",
-                json={
-                    "name": "Default Dograh Model Service Key",
-                    "description": "Auto-generated key for OSS user",
-                    "expires_in_days": 7,  # Short-lived for OSS
-                    "created_by": user_provider_id,
-                },
-                timeout=10.0,
-            )
-        else:
-            # For authenticated mode, use the secret key and organization ID
-            if not DOGRAH_MPS_SECRET_KEY:
-                logger.warning(
-                    "Warning: DOGRAH_MPS_SECRET_KEY not set for authenticated mode"
-                )
-                raise ValidationError("Missing DOGRAH_MPS_SECRET_KEY in non oss mode")
-
-            response = await client.post(
-                f"{MPS_API_URL}/api/v1/service-keys/",
-                json={
-                    "name": "Default Dograh Model Service Key",
-                    "description": f"Auto-generated key for organization {organization_id}",
-                    "organization_id": organization_id,
-                    "expires_in_days": 90,  # Longer-lived for authenticated users
-                    "created_by": user_provider_id,
-                },
-                headers={"X-Secret-Key": DOGRAH_MPS_SECRET_KEY},
-                timeout=10.0,
-            )
-
-        if response.status_code == 200:
-            data = response.json()
-            service_key = data.get("service_key")
-
-            if service_key:
-                # Create configuration JSON for storage in database
-                # The service_factory will use this to instantiate actual services
-                configuration = {
-                    "llm": {
-                        "provider": ServiceProviders.DOGRAH.value,
-                        "api_key": [service_key],
-                        "model": "default",
-                    },
-                    "tts": {
-                        "provider": ServiceProviders.DOGRAH.value,
-                        "api_key": [service_key],
-                        "model": "default",
-                        "voice": "default",
-                    },
-                    "stt": {
-                        "provider": ServiceProviders.DOGRAH.value,
-                        "api_key": [service_key],
-                        "model": "default",
-                    },
-                    "embeddings": {
-                        "provider": ServiceProviders.DOGRAH.value,
-                        "api_key": [service_key],
-                        "model": "dograh_embedding_v1",
-                    },
-                }
-                effective_config = EffectiveAIModelConfiguration(**configuration)
-                return effective_config
-        else:
-            logger.warning(
-                f"Failed to get MPS service key: {response.status_code} - {response.text}"
-            )
-
-
 async def get_superuser(
     authorization: Annotated[str | None, Header()] = None,
     x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
 ) -> UserModel:
     """
-    Dependency to check if the authenticated user is a superuser.
-    Raises HTTPException if user is not authenticated or not a superuser.
+    Dependency to check if the authenticated user is the platform admin.
+    Raises HTTPException if user is not authenticated or does not match the
+    reserved superadmin account.
     """
     user = await get_user(authorization, x_api_key)
 
-    if not user.is_superuser:
+    normalized_email = (user.email or "").strip().lower()
+
+    if not user.is_superuser or normalized_email != PLATFORM_ADMIN_EMAIL:
         raise HTTPException(
-            status_code=403, detail="Access denied. Superuser privileges required."
+            status_code=403,
+            detail=(
+                "Access denied. Only the reserved platform admin account may "
+                "access this resource."
+            ),
         )
 
     return user

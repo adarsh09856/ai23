@@ -1,4 +1,4 @@
-import secrets
+﻿import secrets
 from typing import Annotated
 
 from fastapi import APIRouter, Header, HTTPException, status
@@ -19,8 +19,12 @@ from api.routes.public_download import router as public_download_router
 from api.routes.public_embed import router as public_embed_router
 from api.routes.reports import router as reports_router
 from api.routes.s3_signed_url import router as s3_router
-from api.routes.service_keys import router as service_keys_router
 from api.routes.superuser import router as superuser_router
+from api.routes.admin.analytics import router as admin_analytics_router
+from api.routes.admin.users import router as admin_users_router
+from api.routes.admin.organizations import router as admin_organizations_router
+from api.routes.admin.providers import router as admin_providers_router
+from api.routes.admin.user_providers import router as user_providers_router
 from api.routes.telephony import router as telephony_router
 from api.routes.tool import router as tool_router
 from api.routes.turn_credentials import router as turn_credentials_router
@@ -39,6 +43,11 @@ router = APIRouter(
 
 router.include_router(telephony_router)
 router.include_router(superuser_router)
+router.include_router(admin_analytics_router)
+router.include_router(admin_users_router)
+router.include_router(admin_organizations_router)
+router.include_router(admin_providers_router)
+router.include_router(user_providers_router)
 router.include_router(workflow_router)
 router.include_router(workflow_text_chat_router)
 router.include_router(user_router)
@@ -47,7 +56,6 @@ router.include_router(credentials_router)
 router.include_router(tool_router)
 router.include_router(organization_router)
 router.include_router(s3_router)
-router.include_router(service_keys_router)
 router.include_router(organization_usage_router)
 router.include_router(reports_router)
 router.include_router(webrtc_signaling_router)

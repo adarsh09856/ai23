@@ -75,7 +75,6 @@ class ServiceProviders(str, Enum):
     GOOGLE = "google"
     AZURE = "azure"
     AZURE_SPEECH = "azure_speech"
-    KODEWAVES = "kodewaves"
     DOGRAH = "dograh"
     SARVAM = "sarvam"
     SPEECHMATICS = "speechmatics"
@@ -100,6 +99,43 @@ class ServiceProviders(str, Enum):
 
 
 class BaseServiceConfiguration(BaseModel):
+    """
+    Base configuration for all AI service providers (LLM, TTS, STT, Embeddings, Realtime).
+    
+    ARCHITECTURE: User-Owned Provider Keys (BYOK - Bring Your Own Key)
+    ----------------------------------------------------------------
+    Dograh uses a BYOK architecture where users and organizations provide their own
+    API keys for third-party AI providers (OpenAI, Claude, Deepgram, ElevenLabs, etc).
+    
+    - Users configure their own provider credentials via the UI or API
+    - Keys are stored per-organization in organization_configurations table
+    - Admin does NOT store shared production keys for all users
+    - Admin CAN control provider visibility, policy, and defaults
+    
+    Multi-Key Rotation (Native Support):
+    ------------------------------------
+    The api_key field accepts either a single string or a list of strings.
+    When multiple keys are provided, __getattribute__ randomly selects one on each access.
+    This enables:
+    - Load distribution across multiple API keys
+    - Rate limit avoidance
+    - Automatic failover without code changes
+    
+    Validation & Masking:
+    ---------------------
+    - User-provided keys are validated before save (check_validity.py)
+    - Keys are masked in API responses (masking.py)
+    - Validation state is cached with last_validated_at timestamp
+    
+    Example Configuration:
+    ----------------------
+    {
+        "provider": "openai",
+        "api_key": ["sk-proj-abc123", "sk-proj-def456"],  # Multi-key rotation
+        "model": "gpt-4"
+    }
+    """
+    
     provider: Literal[
         ServiceProviders.OPENAI,
         ServiceProviders.DEEPGRAM,
@@ -250,8 +286,7 @@ GOOGLE_PROVIDER_MODEL_CONFIG = provider_model_config("Google")
 GROQ_PROVIDER_MODEL_CONFIG = provider_model_config("Groq")
 OPENROUTER_PROVIDER_MODEL_CONFIG = provider_model_config("Open Router")
 AZURE_OPENAI_PROVIDER_MODEL_CONFIG = provider_model_config("Azure OpenAI")
-KODEWAVES_PROVIDER_MODEL_CONFIG = provider_model_config("Kodewaves")
-DOGRAH_PROVIDER_MODEL_CONFIG = provider_model_config("Kodewaves")
+DOGRAH_PROVIDER_MODEL_CONFIG = provider_model_config("Dograh")
 AWS_BEDROCK_PROVIDER_MODEL_CONFIG = provider_model_config("AWS Bedrock")
 GOOGLE_VERTEX_PROVIDER_MODEL_CONFIG = provider_model_config("Google Vertex")
 OPENAI_REALTIME_PROVIDER_MODEL_CONFIG = provider_model_config("OpenAI Realtime")

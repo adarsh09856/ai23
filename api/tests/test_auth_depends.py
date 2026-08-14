@@ -53,10 +53,23 @@ async def test_get_user_initializes_hosted_mps_billing_for_new_org(monkeypatch):
         "update_user_selected_organization",
         AsyncMock(),
     )
+    get_user_configurations = AsyncMock(return_value=existing_config)
+    update_user_configuration = AsyncMock()
+    upsert_configuration = AsyncMock()
     monkeypatch.setattr(
         auth_depends.db_client,
         "get_user_configurations",
-        AsyncMock(return_value=existing_config),
+        get_user_configurations,
+    )
+    monkeypatch.setattr(
+        auth_depends.db_client,
+        "update_user_configuration",
+        update_user_configuration,
+    )
+    monkeypatch.setattr(
+        auth_depends.db_client,
+        "upsert_configuration",
+        upsert_configuration,
     )
     monkeypatch.setattr(
         auth_depends,
@@ -84,6 +97,9 @@ async def test_get_user_initializes_hosted_mps_billing_for_new_org(monkeypatch):
     assert result is user
     assert result.selected_organization_id == 42
     ensure_billing.assert_awaited_once_with(42, created_by="stack-user-1")
+    get_user_configurations.assert_not_awaited()
+    update_user_configuration.assert_not_awaited()
+    upsert_configuration.assert_not_awaited()
 
     assert len(group_calls) == 1
     group_args, group_kwargs = group_calls[0]
@@ -207,6 +223,44 @@ def test_associate_user_with_posthog_org_supports_backfill_arguments(monkeypatch
         "organization_was_created": False,
     }
     assert "backfilled" not in capture_kwargs["properties"]
+
+
+@pytest.mark.asyncio
+async def test_get_superuser_allows_reserved_platform_admin(monkeypatch):
+    platform_admin = SimpleNamespace(
+        is_superuser=True,
+        email="Admin@Admin.com",
+    )
+
+    monkeypatch.setattr(
+        auth_depends,
+        "get_user",
+        AsyncMock(return_value=platform_admin),
+    )
+
+    result = await auth_depends.get_superuser(authorization="Bearer token")
+
+    assert result is platform_admin
+
+
+@pytest.mark.asyncio
+async def test_get_superuser_rejects_other_superusers(monkeypatch):
+    non_reserved_superuser = SimpleNamespace(
+        is_superuser=True,
+        email="someone@example.com",
+    )
+
+    monkeypatch.setattr(
+        auth_depends,
+        "get_user",
+        AsyncMock(return_value=non_reserved_superuser),
+    )
+
+    with pytest.raises(auth_depends.HTTPException) as exc_info:
+        await auth_depends.get_superuser(authorization="Bearer token")
+
+    assert exc_info.value.status_code == 403
+    assert "reserved platform admin account" in exc_info.value.detail
 
 
 def test_sync_created_organization_to_posthog_with_provider_id(monkeypatch):

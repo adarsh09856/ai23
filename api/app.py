@@ -83,12 +83,13 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Kodewaves API",
-    description="API for the Kodewaves app",
+    title="Dograh API",
+    description="API for the Dograh app",
     version="1.0.0",
     openapi_url=f"{API_PREFIX}/openapi.json",
     lifespan=lifespan,
     servers=[
+        {"url": "https://app.dograh.com", "description": "Production"},
         {"url": "http://localhost:8000", "description": "Local development"},
     ],
 )

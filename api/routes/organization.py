@@ -411,8 +411,12 @@ async def save_model_configuration_v2(
     try:
         check_for_masked_keys_in_ai_model_configuration_v2(configuration)
         effective = compile_ai_model_configuration_v2(configuration)
+        # Inject admin keys before validation so we don't reject configs that
+        # rely on admin-managed keys (the user only picks provider + model).
+        from api.services.configuration.admin_key_injection import inject_admin_keys
+        effective_with_keys = await inject_admin_keys(effective)
         await UserConfigurationValidator().validate(
-            effective,
+            effective_with_keys,
             organization_id=organization_id,
             created_by=user.provider_id,
         )

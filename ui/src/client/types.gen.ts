@@ -308,9 +308,17 @@ export type AuthUserResponse = {
      */
     id: number;
     /**
+     * Email
+     */
+    email: string | null;
+    /**
      * Is Superuser
      */
     is_superuser: boolean;
+    /**
+     * Is Platform Admin
+     */
+    is_platform_admin: boolean;
 };
 
 /**

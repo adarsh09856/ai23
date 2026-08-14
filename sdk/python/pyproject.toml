@@ -1,7 +1,7 @@
 [project]
-name = "kodewaves-sdk"
+name = "dograh-sdk"
 version = "0.1.8"
-description = "Typed builder for Kodewaves voice-AI workflows"
+description = "Typed builder for Dograh voice-AI workflows"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "BSD-2-Clause" }

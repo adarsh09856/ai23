@@ -17,21 +17,22 @@ export function BrandLogo({
 }) {
   if (mark) {
     return (
-      <div className={cn("flex items-center gap-2 font-bold tracking-tight text-primary text-xl select-none", className)}>
-        <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground font-black text-sm">
-          K
-        </span>
-      </div>
+      // eslint-disable-next-line @next/next/no-img-element
+      <img src="/dograh-mark.png" alt="Dograh" className={cn("w-auto select-none", className)} />
+    );
+  }
+  if (inverse) {
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img src="/dograh-logo-inverse.png" alt="Dograh" className={cn("w-auto select-none", className)} />
     );
   }
   return (
-    <div className={cn("flex items-center gap-2 font-bold tracking-tight text-xl select-none", inverse ? "text-white" : "text-foreground", className)}>
-      <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-blue-600 text-white font-black text-xs">
-        KW
-      </span>
-      <span className="font-extrabold text-lg tracking-wide">
-        Kode<span className="text-blue-500">waves</span>
-      </span>
-    </div>
+    <>
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src="/dograh-logo.png" alt="Dograh" className={cn("block w-auto select-none dark:hidden", className)} />
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src="/dograh-logo-inverse.png" alt="Dograh" className={cn("hidden w-auto select-none dark:block", className)} />
+    </>
   );
 }

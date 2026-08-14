@@ -37,6 +37,7 @@ from api.services.configuration.masking import (
     mask_key,
     resolve_masked_api_keys,
 )
+from api.services.configuration.admin_key_injection import inject_admin_keys
 from api.services.configuration.registry import ServiceProviders
 from api.services.configuration.resolve import resolve_effective_config
 
@@ -76,12 +77,16 @@ async def get_resolved_ai_model_configuration(
             effective.last_validated_at = (
                 organization_configuration_row.last_validated_at
             )
+        # Inject admin-managed provider keys where the org has none (admin-key platform mode)
+        effective = await inject_admin_keys(effective)
         return ResolvedAIModelConfiguration(
             effective=effective,
             source="organization_v2",
             organization_configuration=organization_configuration,
         )
 
+    # Even with no org config, try to build a default effective config from admin keys
+    # so that a brand-new org can still make calls with the platform defaults
     return ResolvedAIModelConfiguration(
         effective=EffectiveAIModelConfiguration(),
         source="empty",
@@ -98,17 +103,19 @@ async def get_effective_ai_model_configuration_for_workflow(
         WORKFLOW_MODEL_CONFIGURATION_V2_OVERRIDE_KEY
     )
     if v2_override:
-        return compile_ai_model_configuration_v2(
+        effective = compile_ai_model_configuration_v2(
             OrganizationAIModelConfigurationV2.model_validate(v2_override)
         )
+        return await inject_admin_keys(effective)
 
     resolved_config = await get_resolved_ai_model_configuration(
         organization_id=organization_id,
     )
-    return resolve_effective_config(
+    effective = resolve_effective_config(
         resolved_config.effective,
         workflow_configurations.get("model_overrides"),
     )
+    return await inject_admin_keys(effective)
 
 
 async def get_organization_ai_model_configuration_v2(
